@@ -56,11 +56,13 @@ Optymalny przydział to problem kombinatoryczny, a liczba możliwych grafików r
 
 - [ ] sieć neuronowa
 - [ ] system ekspertowy / wnioskowanie regułowe
-- [ ] algorytm genetyczny
+- [x] algorytm genetyczny
 - [ ] klasyczne uczenie maszynowe
 - [ ] inne:
 
 _Dlaczego akurat ta technologia pasuje do tego problemu, 2–3 zdania:_
+
+Grafik zapisujemy jako chromosom (przypisanie technik → projekt), a funkcja przystosowania karze za braki obsady i naruszenia reguł oraz nagradza równe obciążenie. GA przeszukuje przestrzeń globalnie, poprawia rozwiązanie startowe (np. z algorytmu zachłannego) i nie potrzebuje danych treningowych.
 
 ## 6. Dane
 
