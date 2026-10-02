@@ -32,6 +32,8 @@ Rola to nie stanowisko, tylko deklaracja, za co ta osoba odpowiada: dane, implem
 
 _Co system ma robić i dla kogo. Opis sytuacji, nie nazwy technologii. 3–5 zdań._
 
+System ma układać grafik wyjazdów techników do projektów dla zespołu PM, który nie ma czasu planować ręcznie. Każdy technik ma inne certyfikaty z datami ważności, dostępność i limit dni wyjazdowych, a każdy projekt wymaga określonych uprawnień i liczby osób w danym terminie. System ma obsadzić wszystkie projekty tak, by nikt nie był w dwóch miejscach naraz, certyfikaty były ważne w dniu projektu, a obciążenie techników było równe. PM tylko zatwierdza lub poprawia gotowy grafik.
+
 ## 4. Dlaczego zwykły algorytm nie wystarczy
 
 _Wskażcie jeden z trzech powodów omawianych na zajęciach i uzasadnijcie:_
