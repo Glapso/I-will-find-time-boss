@@ -24,9 +24,9 @@ Rola to nie stanowisko, tylko deklaracja, za co ta osoba odpowiada: dane, implem
 
 ## 2. Tytuł projektu
 
-**Po polsku:**
+**Po polsku:Znajdę czas szefie**
 
-**Po angielsku:**
+**Po angielsku:I will find time boss**
 
 ## 3. Problem
 
