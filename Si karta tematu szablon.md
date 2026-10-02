@@ -39,10 +39,12 @@ System ma układać grafik wyjazdów techników do projektów dla zespołu PM, k
 _Wskażcie jeden z trzech powodów omawianych na zajęciach i uzasadnijcie:_
 
 - [ ] nie umiemy zapisać reguły krok po kroku
-- [ ] przepis istnieje, ale jest obliczeniowo za drogi
+- [x] przepis istnieje, ale jest obliczeniowo za drogi
 - [ ] reguł jest za dużo i zmieniają się w czasie
 
 _Uzasadnienie, 2–3 zdania:_
+
+Optymalny przydział to problem kombinatoryczny, a liczba możliwych grafików rośnie wykładniczo z liczbą techników i projektów, więc sprawdzenie wszystkich jest niewykonalne. Szybki algorytm zachłanny daje poprawny, ale nieoptymalny grafik: zostawia braki obsady, mimo że wolni technicy istnieją, bo decyzje podejmuje po kolei i nie cofa się. Potrzebna jest metoda, która przeszukuje przestrzeń rozwiązań globalnie.
 
 ---
 
