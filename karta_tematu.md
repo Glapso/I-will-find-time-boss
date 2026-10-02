@@ -116,7 +116,7 @@ _Co dorobicie, jeśli starczy czasu. Brak realizacji tej części nie obniża oc
 
 ## 11. Repozytorium
 
-_Link:_
+_Link: https://github.com/Glapso/I-will-find-time-boss/tree/main_
 
 ## 12. Główne ryzyko i plan awaryjny
 
