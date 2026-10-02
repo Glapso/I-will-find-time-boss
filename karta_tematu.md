@@ -8,7 +8,8 @@ share_updated: 2026-09-27T09:38:22+02:00
 > 
 > Usuńcie ten blok po wypełnieniu.
 
-**Grupa:** L3 (niestacjonarna) / L2 (stacjonarna) — zostawcie właściwe **Data zgłoszenia:**
+**Grupa: L3** 
+**Data zgłoszenia: 3.10**
 
 ---
 
