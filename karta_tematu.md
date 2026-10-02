@@ -122,6 +122,15 @@ _Link:_
 
 _Co najprawdopodobniej pójdzie nie tak i co wtedy zrobicie._
 
+Najbardziej prawdopodobne, że algorytm genetyczny nie pobije wyraźnie algorytmu zachłannego. Zachłanny jest szybki i na łatwych instancjach daje już dobre grafiki, a GA wymaga strojenia (rozmiar populacji, krzyżowanie, mutacja, wagi kar w funkcji przystosowania) i bez tego może zbiegać wolno albo utknąć w rozwiązaniach łamiących reguły.
+
+Plan awaryjny:
+
+- Populację początkową zasilamy rozwiązaniem zachłannym, więc GA nigdy nie wypada gorzej niż baseline, a tylko je poprawia.
+- Jeśli różnica jest mała, zaostrzamy instancje testowe (zapotrzebowanie bliżej pojemności kurierów), bo tam przewaga przeszukiwania globalnego jest widoczna.
+- Jeśli mimo to wynik jest słaby, rzetelnie raportujemy porównanie i analizujemy, dlaczego tak wyszło (to też jest wartościowy wniosek do sprawozdania), a punktem odniesienia dodajemy CP-SAT z zakresu opcjonalnego, żeby pokazać, jak daleko oba podejścia są od optimum.
+- Zakres minimalny jest zaplanowany tak, żeby projekt dało się oddać nawet bez wyraźnej przewagi GA: liczy się działające rozwiązanie i uczciwy pomiar.
+
 ## 13. Podział pracy w czasie
 
 |Etap|Kto|Szacowany czas|
