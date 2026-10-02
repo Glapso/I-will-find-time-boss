@@ -5,6 +5,8 @@
 
 ## 1. Skład zespołu
 
+|||
+|---|---|
 |Imię i nazwisko|Nr albumu|Rola w zespole|
 |Wojciech Stanisławski|31830|koordynacja, dokumentacja|
 |Igor Chojan|32124|implementacja|
