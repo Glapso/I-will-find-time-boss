@@ -33,7 +33,7 @@ Rola to nie stanowisko, tylko deklaracja, za co ta osoba odpowiada: dane, implem
 
 _Co system ma robić i dla kogo. Opis sytuacji, nie nazwy technologii. 3–5 zdań._
 
-System ma układać grafik wyjazdów techników do projektów dla zespołu PM, który nie ma czasu planować ręcznie. Każdy technik ma inne certyfikaty z datami ważności, dostępność i limit dni wyjazdowych, a każdy projekt wymaga określonych uprawnień i liczby osób w danym terminie. System ma obsadzić wszystkie projekty tak, by nikt nie był w dwóch miejscach naraz, certyfikaty były ważne w dniu projektu, a obciążenie techników było równe. PM tylko zatwierdza lub poprawia gotowy grafik.
+System ma w kilka minut układać tygodniowy grafik kurierów dla menedżera lokalu z dowozem, tak aby liczba osób na zmianie odpowiadała zapotrzebowaniu w każdej godzinie. Dziś menedżer układa grafik "z głowy", łącząc zmienne zapotrzebowanie (piątkowy wieczór vs wtorkowe popołudnie), uprawnienia kurierów (auto, skuter, ważne orzeczenie sanepidowskie i BHP) oraz dostępność i limity godzin (studenci, limity tygodniowe, 11 h odpoczynku). W szczytach brakuje ludzi, a w dołkach kurierzy stoją bezczynnie i generują koszt. Aplikacja przejmuje liczenie, a menedżer tylko zatwierdza lub poprawia wynik.
 
 ## 4. Dlaczego zwykły algorytm nie wystarczy
 
@@ -45,7 +45,7 @@ _Wskażcie jeden z trzech powodów omawianych na zajęciach i uzasadnijcie:_
 
 _Uzasadnienie, 2–3 zdania:_
 
-Optymalny przydział to problem kombinatoryczny, a liczba możliwych grafików rośnie wykładniczo z liczbą techników i projektów, więc sprawdzenie wszystkich jest niewykonalne. Szybki algorytm zachłanny daje poprawny, ale nieoptymalny grafik: zostawia braki obsady, mimo że wolni technicy istnieją, bo decyzje podejmuje po kolei i nie cofa się. Potrzebna jest metoda, która przeszukuje przestrzeń rozwiązań globalnie.
+Liczba możliwych grafików (kto, którego dnia, od której do której godziny) rośnie wykładniczo wraz z liczbą kurierów i godzin, więc sprawdzenie wszystkich jest niewykonalne. Szybki algorytm zachłanny układa grafik dzień po dniu i nie cofa wcześniejszych decyzji, dlatego zostawia braki w obsadzie, mimo że wolni kurierzy istnieją. Potrzebna jest metoda, która przeszukuje przestrzeń rozwiązań globalnie.
 
 ---
 
@@ -63,7 +63,7 @@ Optymalny przydział to problem kombinatoryczny, a liczba możliwych grafików r
 
 _Dlaczego akurat ta technologia pasuje do tego problemu, 2–3 zdania:_
 
-Grafik zapisujemy jako chromosom (przypisanie technik → projekt), a funkcja przystosowania karze za braki obsady i naruszenia reguł oraz nagradza równe obciążenie. GA przeszukuje przestrzeń globalnie, poprawia rozwiązanie startowe (np. z algorytmu zachłannego) i nie potrzebuje danych treningowych.
+Grafik zapisujemy jako chromosom (dla każdego kuriera i dnia: wolne albo start i długość zmiany), a funkcja przystosowania karze za braki obsady, nadwyżki i naruszenia reguł, a nagradza równe obciążenie. GA przeszukuje przestrzeń globalnie, może startować od rozwiązania zachłannego i poprawiać je, a nie potrzebuje danych treningowych, których nie mamy.
 
 ## 6. Dane
 
