@@ -16,9 +16,9 @@ share_updated: 2026-09-27T09:38:22+02:00
 
 |Imię i nazwisko|Nr albumu|Rola w zespole|
 |---|---|---|
-||||
-||||
-||||
+|Wojciech Stanisławski|31830||
+|Igor Chojan|32124||
+|Gabriel Czapelski|31873||
 
 Rola to nie stanowisko, tylko deklaracja, za co ta osoba odpowiada: dane, implementacja, ewaluacja, dokumentacja, koordynacja.
 
