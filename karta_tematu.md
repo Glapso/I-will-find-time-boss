@@ -84,6 +84,8 @@ _Co powstanie na pewno. To jest obietnica, z której będziecie rozliczeni._
 - Generator danych syntetycznych kurierów i zapotrzebowanie,
 - reprezentacja grafiku i funkcja przystosowania z regułami twardymi,
 - działający algorytm genetyczny,
+- działający algorytm zachłanny
+- porównanie algorytmu genetycznego z algorytmem zachłannym
 - dokumentacja
 
 ## 10. Zakres opcjonalny
@@ -104,18 +106,18 @@ _Link: https://github.com/Glapso/I-will-find-time-boss/tree/main_
 
 _Co najprawdopodobniej pójdzie nie tak i co wtedy zrobicie._
 
-Najbardziej prawdopodobne, że algorytm genetyczny nie pobije wyraźnie algorytmu zachłannego, bo wymaga strojenia, a na łatwych danych zachłanny daje już dobry wynik. Wtedy wystartujemy GA od rozwiązania zachłannego (żeby nigdy nie było gorsze od baseline'u), zaostrzymy dane testowe i rzetelnie opiszemy w sprawozdaniu, jak wyszło i dlaczego.
+Najbardziej prawdopodobne, że algorytm genetyczny nie pobije wyraźnie algorytmu zachłannego, bo wymaga strojenia, a na łatwych danych zachłanny daje już dobry wynik. Wtedy wystartujemy GA od rozwiązania zachłannego, zaostrzymy dane testowe i rzetelnie opiszemy w sprawozdaniu, jak wyszło i dlaczego.
 
 ## 13. Podział pracy w czasie
 
 |Etap|Kto|Szacowany czas|
 |---|---|---|
-|Dane i przygotowanie|||
-|Implementacja|||
-|Eksperymenty i ewaluacja|||
-|Dokumentacja PL|||
-|Dokumentacja EN|||
-|Prezentacja|||
+|Dane i przygotowanie|Gabriel Czapelski|12h|
+|Implementacja|Igor Chojan|28h|
+|Eksperymenty i ewaluacja|Gabriel Czapelski|16h|
+|Dokumentacja PL|Wojciech Stanisławski|16h|
+|Dokumentacja EN|Wojciech Stanisławski|8h|
+|Prezentacja|Wojciech Stanisławski|8h|
 |**Razem na osobę**||**28–30 h**|
 
 ---
