@@ -1,0 +1,450 @@
+Co robi:
+  1. wczytuje kurierów (pojazdy, badania, dostępność, limity godzin),
+  2. bierze zapotrzebowanie: zamówienia na każdą godzinę każdego dnia tygodnia
+     (z pliku zapotrzebowanie.csv albo liczone z historii zamówień),
+  3. układa grafik algorytmem zachłannym z naprawą lokalną,
+  4. zapisuje grafik i raportuje pokrycie, koszty godzin i alerty.
+
+Działa od razu na danych z generator.py:
+    python generator.py --ziarno 7 --tydzien 2026-10-19
+    python model_zachlanny.py --dane dane_symulowane/ziarno_7_2026-10-19
+
+Wymaga: pandas.
+"""
+import math, os
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+import pandas as pd
+
+DNI = ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Nd"]
+
+
+
+@dataclass
+class Ustawienia:
+    otwarcie: int = 11            
+    zamkniecie: int = 23          
+    dostawy_na_h: float = 2.5     
+    min_obsada: int = 1           
+    udzial_aut: float = 0.25      
+    prog_aut: int = 3             
+    max_udzial_rowerow: float = 0.4
+    min_zmiana: int = 4
+    max_zmiana: int = 10
+    odpoczynek: int = 11          
+    wymagane_dokumenty: tuple = ("sanepid_do", "bhp_do")
+    ostrzegaj_dni: int = 30       
+    stawka_domyslna: float = 31.40   
+    dodatek_auto_h: float = 6.0      
+    dodatek_skuter_h: float = 3.0    
+
+
+def okna(tekst):
+    """'11-15, 18-23' -> [(11,15),(18,23)]; puste -> []"""
+    if tekst is None or (isinstance(tekst, float) and math.isnan(tekst)):
+        return []
+    wynik = []
+    for kawalek in str(tekst).replace(";", ",").split(","):
+        kawalek = kawalek.strip()
+        if not kawalek or kawalek in ("-", "0", "x", "X"):
+            continue
+        od, do = kawalek.replace("–", "-").split("-")
+        wynik.append((int(od.split(":")[0]), int(do.split(":")[0])))
+    return wynik
+
+
+def tak(v):
+    return str(v).strip().lower() in ("1", "tak", "t", "true", "x", "yes", "y")
+
+
+def wczytaj_kurierow(sciezka):
+    df = pd.read_csv(sciezka, dtype=str).fillna("")
+    kurierzy = []
+    for _, r in df.iterrows():
+        if r.get("aktywny", "tak") and not tak(r.get("aktywny", "tak")):
+            continue
+        dok = {}
+        for kol in ("sanepid_do", "bhp_do"):
+            dok[kol] = pd.to_datetime(r[kol]).date() if r.get(kol, "") else None
+        kurierzy.append({
+            "imie": r["imie"].strip(),
+            "auto": tak(r.get("auto", "")),
+            "skuter": tak(r.get("skuter", "")),
+            "rower": tak(r.get("rower", "")),
+            "terminal": tak(r.get("terminal", "")),
+            "limit_h": int(float(r.get("limit_h", 40) or 40)),
+            "stawka_h": float(str(r.get("stawka_h", "") or "nan").replace(",", ".")),
+            **dok,
+            "dostepnosc": {d: okna(r.get(d, "")) for d in DNI},
+        })
+    return kurierzy
+
+
+def wczytaj_zapotrzebowanie(sciezka):
+    df = pd.read_csv(sciezka)
+    df["godzina"] = df["godzina"].astype(int)
+    return df.set_index("godzina")[DNI]
+
+
+def obsada(zam, u: Ustawienia):
+    """liczba zamówień na godzinę -> (kurierzy, w tym aut, max rowerów)"""
+    k = max(u.min_obsada, math.ceil(zam / u.dostawy_na_h - 1e-9))
+    auta = math.ceil(k * u.udzial_aut) if k >= u.prog_aut else 0
+    rowery = max(1, math.floor(k * u.max_udzial_rowerow))
+    return k, auta, rowery
+
+
+def tabela_obsady(zap, u):
+    rows = []
+    for d in DNI:
+        for h in range(u.otwarcie, u.zamkniecie):
+            z = int(zap.at[h, d]) if h in zap.index else 0
+            k, a, r = obsada(z, u)
+            rows.append({"dzien": d, "godzina": h, "zamowienia": z, "potrzeba": k, "auta": a, "max_rowery": r})
+    return pd.DataFrame(rows)
+
+
+
+def dokumenty_ok(k, dzien_data, u):
+    return all(k.get(p) is not None and k[p] >= dzien_data for p in u.wymagane_dokumenty)
+
+
+def dostepny(k, dzien, h):
+    return any(od <= h < do for od, do in k["dostepnosc"][dzien])
+
+
+def okno_z_godzina(k, dzien, h):
+    for od, do in k["dostepnosc"][dzien]:
+        if od <= h < do:
+            return od, do
+    return None
+
+
+def odpoczynek_ok(zmiany_k, data_dnia, start, koniec, u):
+    """sprawdza 11 h przerwy względem zmian z dnia poprzedniego i następnego"""
+    for z in zmiany_k:
+        if z["data"] == data_dnia - timedelta(days=1) and (24 - z["koniec"]) + start < u.odpoczynek:
+            return False
+        if z["data"] == data_dnia + timedelta(days=1) and (24 - koniec) + z["start"] < u.odpoczynek:
+            return False
+    return True
+
+
+def generuj_grafik(kurierzy, zap, poniedzialek: date, u: Ustawienia = Ustawienia()):
+    """Algorytm zachłanny + naprawa lokalna.
+    1) dni od najbardziej obciążonego; w każdym dniu zamykamy największą lukę,
+       dobierając kuriera i budując wokół luki zmianę min_zmiana..max_zmiana h,
+    2) naprawa: przycinanie nadwyżek na krawędziach zmian, przesuwanie zmian
+       w stronę braków, wydłużanie zmian o godziny z brakiem,
+    3) druga runda: zwolnione godziny kurierów idą na dni, które nadal mają braki."""
+    ob = tabela_obsady(zap, u)
+    godziny = list(range(u.otwarcie, u.zamkniecie))
+    po_imieniu = {k["imie"]: k for k in kurierzy}
+    zmiany = []
+
+    def data_dnia(dzien):
+        return poniedzialek + timedelta(days=DNI.index(dzien))
+
+    def uzyte(im):
+        return sum(z["koniec"] - z["start"] for z in zmiany if z["kurier"] == im)
+
+    def stan(dzien):
+        cover = {h: 0 for h in godziny}; auta = dict(cover); rowery = dict(cover)
+        for z in zmiany:
+            if z["dzien"] != dzien:
+                continue
+            for g in range(z["start"], z["koniec"]):
+                cover[g] += 1
+                auta[g] += z["pojazd"] == "auto"
+                rowery[g] += z["pojazd"] == "rower"
+        return cover, auta, rowery
+
+    def brak_sumaryczny(dzien, o):
+        cover, _, _ = stan(dzien)
+        return sum(max(0, o.at[h, "potrzeba"] - cover[h]) for h in godziny)
+
+    def wypelnij(dzien):
+        o = ob[ob.dzien == dzien].set_index("godzina")
+        dd = data_dnia(dzien)
+        nie_do_obsadzenia = set()
+        while True:
+            cover, auta, rowery = stan(dzien)
+            luka = lambda g: o.at[g, "potrzeba"] - cover[g]
+            luka_aut = lambda g: o.at[g, "auta"] - auta[g]
+            kandydaci_h = [h for h in godziny if luka(h) > 0 and h not in nie_do_obsadzenia]
+            if not kandydaci_h:
+                return
+            h = max(kandydaci_h, key=lambda g: (luka(g), luka_aut(g), o.at[g, "potrzeba"]))
+            potrzeba_auta = luka_aut(h) > 0
+            pracuje_dzis = {z["kurier"] for z in zmiany if z["dzien"] == dzien}
+
+            najlepszy = None
+            for k in kurierzy:
+                im = k["imie"]
+                if im in pracuje_dzis or not dostepny(k, dzien, h) or not dokumenty_ok(k, dd, u):
+                    continue
+                zostalo = k["limit_h"] - uzyte(im)
+                od, do = okno_z_godzina(k, dzien, h)
+                if min(zostalo, do - od) < u.min_zmiana:
+                    continue
+                rower_ok = rowery[h] < o.at[h, "max_rowery"]
+                if not (k["auto"] or k["skuter"] or (k["rower"] and rower_ok)):
+                    continue
+                pokrywa = sum(1 for g in range(od, do) if g in cover and luka(g) > 0)
+                wynik = (
+                    1 if (potrzeba_auta and k["auto"]) else 0,   
+                    -uzyte(im) / max(k["limit_h"], 1),           
+                    pokrywa,                                     
+                    0 if (k["auto"] and not potrzeba_auta) else 1,  
+                )
+                if najlepszy is None or wynik > najlepszy[0]:
+                    najlepszy = (wynik, k, od, do, zostalo)
+            if najlepszy is None:
+                nie_do_obsadzenia.add(h)
+                continue
+
+            _, k, od, do, zostalo = najlepszy
+            maks = min(u.max_zmiana, zostalo)
+            start, koniec = h, h + 1
+            while koniec - start < maks:                      
+                lewo = luka(start - 1) if start - 1 >= od and start - 1 in cover else -99
+                prawo = luka(koniec) if koniec < do and koniec in cover else -99
+                if max(lewo, prawo) <= 0:
+                    break
+                if prawo >= lewo: koniec += 1
+                else: start -= 1
+            while koniec - start < u.min_zmiana:              
+                lewo = luka(start - 1) if start - 1 >= od and start - 1 in cover else -99
+                prawo = luka(koniec) if koniec < do and koniec in cover else -99
+                if max(lewo, prawo) == -99:
+                    break
+                if prawo >= lewo: koniec += 1
+                else: start -= 1
+            if koniec - start < u.min_zmiana or not odpoczynek_ok(
+                    [z for z in zmiany if z["kurier"] == k["imie"]], dd, start, koniec, u):
+                nie_do_obsadzenia.add(h)
+                continue
+
+            if potrzeba_auta and k["auto"]: pojazd = "auto"
+            elif k["skuter"]: pojazd = "skuter"
+            elif k["rower"] and rowery[h] < o.at[h, "max_rowery"]: pojazd = "rower"
+            else: pojazd = "auto"
+            zmiany.append({"dzien": dzien, "data": dd, "kurier": k["imie"], "start": start,
+                           "koniec": koniec, "godziny": koniec - start, "pojazd": pojazd,
+                           "terminal": k["terminal"], "zrodlo": "auto"})
+
+    def napraw(dzien):
+        o = ob[ob.dzien == dzien].set_index("godzina")
+        for _ in range(50):
+            zmiana_byla = False
+            for z in [z for z in zmiany if z["dzien"] == dzien]:
+                k = po_imieniu[z["kurier"]]
+                od, do = okno_z_godzina(k, dzien, z["start"])
+                cover, auta, _ = stan(dzien)
+                nad = lambda g: cover[g] - o.at[g, "potrzeba"]
+                auto_potrzebne = lambda g: z["pojazd"] == "auto" and auta[g] <= o.at[g, "auta"]
+                if z["koniec"] - z["start"] > u.min_zmiana:
+                    if nad(z["koniec"] - 1) > 0 and not auto_potrzebne(z["koniec"] - 1):
+                        z["koniec"] -= 1; zmiana_byla = True; continue
+                    if nad(z["start"]) > 0 and not auto_potrzebne(z["start"]):
+                        z["start"] += 1; zmiana_byla = True; continue
+                przed = brak_sumaryczny(dzien, o)
+                for d in (-1, 1, -2, 2, -3, 3):
+                    ns, nk = z["start"] + d, z["koniec"] + d
+                    if ns < max(od, u.otwarcie) or nk > min(do, u.zamkniecie):
+                        continue
+                    stare = (z["start"], z["koniec"])
+                    z["start"], z["koniec"] = ns, nk
+                    if brak_sumaryczny(dzien, o) < przed:
+                        zmiana_byla = True; break
+                    z["start"], z["koniec"] = stare
+                else:
+                    if z["koniec"] - z["start"] < u.max_zmiana and uzyte(k["imie"]) < k["limit_h"]:
+                        if z["koniec"] < min(do, u.zamkniecie) and nad(z["koniec"]) < 0:
+                            z["koniec"] += 1; zmiana_byla = True
+                        elif z["start"] > max(od, u.otwarcie) and nad(z["start"] - 1) < 0:
+                            z["start"] -= 1; zmiana_byla = True
+            if not zmiana_byla:
+                break
+        for z in zmiany:
+            z["godziny"] = z["koniec"] - z["start"]
+
+    kolejnosc = ob.groupby("dzien")["potrzeba"].sum().sort_values(ascending=False).index.tolist()
+    for dzien in kolejnosc:
+        wypelnij(dzien); napraw(dzien)
+    for dzien in kolejnosc:            
+        napraw(dzien); wypelnij(dzien); napraw(dzien)
+
+    grafik = pd.DataFrame(zmiany)
+    if not grafik.empty:
+        grafik["dzien_nr"] = grafik["dzien"].map(DNI.index)
+        grafik = grafik.sort_values(["dzien_nr", "start", "kurier"]).drop(columns="dzien_nr").reset_index(drop=True)
+    return grafik
+
+
+def zastosuj_korekty(grafik, sciezka, kurierzy, poniedzialek):
+    """korekty.csv: kurier,dzien,start,koniec[,pojazd]; puste start = usuń zmianę"""
+    if not os.path.exists(sciezka):
+        return grafik
+    kor = pd.read_csv(sciezka, dtype=str).fillna("")
+    if kor.empty:
+        return grafik
+    po_imieniu = {k["imie"]: k for k in kurierzy}
+    g = grafik.copy()
+    for _, r in kor.iterrows():
+        g = g[~((g.kurier == r.kurier) & (g.dzien == r.dzien))]
+        if r.start:
+            k = po_imieniu.get(r.kurier, {})
+            pojazd = r.get("pojazd", "") or ("skuter" if k.get("skuter") else "auto" if k.get("auto") else "rower")
+            g = pd.concat([g, pd.DataFrame([{
+                "dzien": r.dzien, "data": poniedzialek + timedelta(days=DNI.index(r.dzien)),
+                "kurier": r.kurier, "start": int(r.start), "koniec": int(r.koniec),
+                "godziny": int(r.koniec) - int(r.start), "pojazd": pojazd,
+                "terminal": k.get("terminal", False), "zrodlo": "ręcznie"}])])
+    g["dzien_nr"] = g["dzien"].map(DNI.index)
+    return g.sort_values(["dzien_nr", "start", "kurier"]).drop(columns="dzien_nr").reset_index(drop=True)
+
+
+def pokrycie(grafik, zap, u):
+    ob = tabela_obsady(zap, u)
+    ob["obsada"] = 0
+    ob["auta_w_grafiku"] = 0
+    for _, z in grafik.iterrows():
+        m = (ob.dzien == z.dzien) & (ob.godzina >= z.start) & (ob.godzina < z.koniec)
+        ob.loc[m, "obsada"] += 1
+        if z.pojazd == "auto":
+            ob.loc[m, "auta_w_grafiku"] += 1
+    ob["roznica"] = ob["obsada"] - ob["potrzeba"]
+    return ob
+
+
+def godziny_kurierow(grafik, kurierzy):
+    h = grafik.groupby("kurier")["godziny"].sum() if not grafik.empty else pd.Series(dtype=int)
+    rows = [{"kurier": k["imie"], "godziny": int(h.get(k["imie"], 0)), "limit_h": k["limit_h"],
+             "wykorzystanie_%": round(100 * h.get(k["imie"], 0) / max(k["limit_h"], 1))} for k in kurierzy]
+    return pd.DataFrame(rows).sort_values("wykorzystanie_%", ascending=False).reset_index(drop=True)
+
+
+def alerty(grafik, pok, kurierzy, poniedzialek, u):
+    out = []
+    koniec_tyg = poniedzialek + timedelta(days=6)
+    for k in kurierzy:
+        for p, nazwa in (("sanepid_do", "orzeczenie sanepid"), ("bhp_do", "szkolenie BHP")):
+            d = k.get(p)
+            if d is None:
+                out.append(("BŁĄD", f"{k['imie']}: brak daty – {nazwa}; kurier nie jest planowany"))
+            elif d < poniedzialek:
+                out.append(("BŁĄD", f"{k['imie']}: {nazwa} wygasło {d:%d.%m.%Y}; kurier nie jest planowany"))
+            elif d < koniec_tyg:
+                out.append(("UWAGA", f"{k['imie']}: {nazwa} wygasa {d:%d.%m.%Y} – od następnego dnia nie jest planowany(a)"))
+            elif d <= koniec_tyg + timedelta(days=u.ostrzegaj_dni):
+                out.append(("UWAGA", f"{k['imie']}: {nazwa} ważne do {d:%d.%m.%Y}"))
+    braki = pok[pok.roznica < 0]
+    for dzien, grp in braki.groupby("dzien", sort=False):
+        godz = ", ".join(f"{h}:00 (−{-r})" for h, r in zip(grp.godzina, grp.roznica))
+        out.append(("BRAK", f"{dzien}: brakuje kurierów o {godz}"))
+    brak_aut = pok[pok.auta_w_grafiku < pok.auta]
+    for dzien, grp in brak_aut.groupby("dzien", sort=False):
+        out.append(("UWAGA", f"{dzien}: za mało aut o " + ", ".join(f"{h}:00" for h in grp.godzina)))
+    if not grafik.empty:
+        for dzien in DNI:
+            g = grafik[grafik.dzien == dzien]
+            for h in range(u.otwarcie, u.zamkniecie):
+                na_zmianie = g[(g.start <= h) & (g.koniec > h)]
+                if len(na_zmianie) and not na_zmianie.terminal.any():
+                    out.append(("UWAGA", f"{dzien} {h}:00: nikt na zmianie nie obsługuje terminala"))
+                    break
+    return pd.DataFrame(out, columns=["typ", "komunikat"])
+
+
+def prognoza_z_historii(sciezka, tygodnie=6, u: Ustawienia = Ustawienia(), dostawa_kol="dostawa"):
+    """historia_zamowien.csv: kolumna 'czas' (data i godzina zamówienia) + opcjonalnie 'dostawa' (tak/nie).
+    Zwraca średnią liczbę zamówień z dostawą na (godzina × dzień tygodnia) z ostatnich N tygodni,
+    zaokrągloną w górę do pełnych zamówień (lepiej mieć kuriera za dużo niż za mało)."""
+    h = pd.read_csv(sciezka)
+    h["czas"] = pd.to_datetime(h["czas"])
+    if dostawa_kol in h.columns:
+        h = h[h[dostawa_kol].map(tak)]
+    h = h[h["czas"] >= h["czas"].max().normalize() - pd.Timedelta(weeks=tygodnie)]
+    h["dzien"] = h["czas"].dt.dayofweek.map(lambda i: DNI[i])
+    h["godzina"] = h["czas"].dt.hour
+    h["data"] = h["czas"].dt.date
+    dziennie = h.groupby(["data", "dzien", "godzina"]).size().reset_index(name="n")
+    ile_dni = h.groupby("dzien")["data"].nunique()
+    suma = dziennie.groupby(["godzina", "dzien"])["n"].sum().unstack(fill_value=0)
+    sr = suma / ile_dni
+    sr = sr.reindex(index=range(u.otwarcie, u.zamkniecie), columns=DNI).fillna(0)
+    return sr.apply(lambda s: s.map(lambda v: math.ceil(v - 0.25))).astype(int)   
+
+
+def tabela_tygodnia(grafik, kurierzy):
+    skrot = {"auto": "A", "skuter": "S", "rower": "R"}
+    t = pd.DataFrame("", index=[k["imie"] for k in kurierzy], columns=DNI)
+    for z in grafik.itertuples():
+        t.at[z.kurier, z.dzien] = f"{z.start}–{z.koniec} {skrot.get(z.pojazd, '')}"
+    t["Suma h"] = [int(grafik.loc[grafik.kurier == im, "godziny"].sum()) for im in t.index]
+    return t
+
+
+def _main(argv=None):
+    import argparse, json
+    p = argparse.ArgumentParser(description="Grafik kurierów – model zachłanny.")
+    p.add_argument("--dane", required=True, help="folder z kurierzy.csv i historia_zamowien.csv (np. z generatora)")
+    p.add_argument("--tydzien", default=None, help="poniedziałek RRRR-MM-DD (domyślnie z metadane.json albo najbliższy)")
+    p.add_argument("--zapotrzebowanie", default=None, help="gotowe zapotrzebowanie: godzina, Pon..Nd (zamiast historii)")
+    p.add_argument("--tygodnie", type=int, default=6, help="z ilu ostatnich tygodni historii liczyć średnią")
+    p.add_argument("--dostawy-na-h", type=float, default=2.5, help="ile dostaw kurier robi w godzinę")
+    p.add_argument("--wyjscie", default=None, help="folder na wyniki (domyślnie <dane>/grafik_zachlanny)")
+    a = p.parse_args(argv)
+
+    meta = os.path.join(a.dane, "metadane.json")
+    if a.tydzien:
+        P = date.fromisoformat(a.tydzien)
+    elif os.path.exists(meta):
+        P = date.fromisoformat(json.load(open(meta, encoding="utf-8"))["tydzien"])
+    else:
+        P = date.today() + timedelta(days=7 - date.today().weekday())
+    u = Ustawienia(dostawy_na_h=a.dostawy_na_h)
+
+    kurierzy = wczytaj_kurierow(os.path.join(a.dane, "kurierzy.csv"))
+    if a.zapotrzebowanie:
+        zap = wczytaj_zapotrzebowanie(a.zapotrzebowanie)
+        zrodlo = a.zapotrzebowanie
+    else:
+        zap = prognoza_z_historii(os.path.join(a.dane, "historia_zamowien.csv"), a.tygodnie, u)
+        zrodlo = f"średnia z {a.tygodnie} ostatnich tygodni historii"
+
+    import time
+    t0 = time.time()
+    grafik = generuj_grafik(kurierzy, zap, P, u)
+    czas = time.time() - t0
+    pok = pokrycie(grafik, zap, u)
+    al = alerty(grafik, pok, kurierzy, P, u)
+
+    wyj = a.wyjscie or os.path.join(a.dane, "grafik_zachlanny")
+    os.makedirs(wyj, exist_ok=True)
+    grafik.to_csv(os.path.join(wyj, "grafik.csv"), index=False)
+    tydz = tabela_tygodnia(grafik, kurierzy)
+    tydz.to_csv(os.path.join(wyj, "grafik_tydzien.csv"))
+    pok.to_csv(os.path.join(wyj, "pokrycie.csv"), index=False)
+    al.to_csv(os.path.join(wyj, "alerty.csv"), index=False)
+
+    pd.set_option("display.width", 200)
+    braki = int((-pok.roznica.clip(upper=0)).sum())
+    nadwyzki = int(pok.roznica.clip(lower=0).sum())
+    print(f"Tydzień {P:%d.%m}–{P + timedelta(days=6):%d.%m.%Y} | zapotrzebowanie: {zrodlo}")
+    print(f"Kurierów: {len(kurierzy)} | zmian: {len(grafik)} | godzin: {int(grafik.godziny.sum())} "
+          f"| potrzebne: {int(pok.potrzeba.sum())} | braki: {braki} h | nadwyżki: {nadwyzki} h | {czas:.2f} s\n")
+    print("Grafik (A = auto, S = skuter, R = rower):")
+    print(tydz.to_string(), "\n")
+    print("Obsada minus potrzeba (ujemne = brakuje kurierów):")
+    print(pok.pivot(index="dzien", columns="godzina", values="roznica").loc[DNI].to_string(), "\n")
+    if len(al):
+        print("Alerty:")
+        for r in al.itertuples():
+            print(f"  [{r.typ}] {r.komunikat}")
+    print(f"\nZapisano w: {wyj}")
+
+
+if __name__ == "__main__":
+    _main()
