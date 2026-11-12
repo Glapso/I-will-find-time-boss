@@ -1,5 +1,5 @@
 Co robi:
-  1. wczytuje kurierów (pojazdy, badania, dostępność, limity godzin),
+  1. wczytuje kurierów (pojazdy, badania, dostępność, limity godzin), 
   2. bierze zapotrzebowanie: zamówienia na każdą godzinę każdego dnia tygodnia
      (z pliku zapotrzebowanie.csv albo liczone z historii zamówień),
   3. układa grafik algorytmem zachłannym z naprawą lokalną,
