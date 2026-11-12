@@ -1,0 +1,808 @@
+import math, os
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+import pandas as pd
+
+DNI = ["Pon", "Wt", "Śr", "Czw", "Pt", "Sob", "Nd"]
+
+
+@dataclass
+class Ustawienia:
+    otwarcie: int = 11
+    zamkniecie: int = 23
+    dostawy_na_h: float = 2.5
+    min_obsada: int = 1
+    udzial_aut: float = 0.25
+    prog_aut: int = 3
+    max_udzial_rowerow: float = 0.4
+    min_zmiana: int = 4
+    max_zmiana: int = 10
+    odpoczynek: int = 11
+    wymagane_dokumenty: tuple = ("sanepid_do", "bhp_do")
+    ostrzegaj_dni: int = 30
+    stawka_domyslna: float = 31.4
+    dodatek_auto_h: float = 6.0
+    dodatek_skuter_h: float = 3.0
+
+
+def okna(tekst):
+    if tekst is None or (isinstance(tekst, float) and math.isnan(tekst)):
+        return []
+    wynik = []
+    for kawalek in str(tekst).replace(";", ",").split(","):
+        kawalek = kawalek.strip()
+        if not kawalek or kawalek in ("-", "0", "x", "X"):
+            continue
+        od, do = kawalek.replace("–", "-").split("-")
+        wynik.append((int(od.split(":")[0]), int(do.split(":")[0])))
+    return wynik
+
+
+def tak(v):
+    return str(v).strip().lower() in ("1", "tak", "t", "true", "x", "yes", "y")
+
+
+def wczytaj_kurierow(sciezka):
+    df = pd.read_csv(sciezka, dtype=str).fillna("")
+    kurierzy = []
+    for _, r in df.iterrows():
+        if r.get("aktywny", "tak") and (not tak(r.get("aktywny", "tak"))):
+            continue
+        dok = {}
+        for kol in ("sanepid_do", "bhp_do"):
+            dok[kol] = pd.to_datetime(r[kol]).date() if r.get(kol, "") else None
+        kurierzy.append(
+            {
+                "imie": r["imie"].strip(),
+                "auto": tak(r.get("auto", "")),
+                "skuter": tak(r.get("skuter", "")),
+                "rower": tak(r.get("rower", "")),
+                "terminal": tak(r.get("terminal", "")),
+                "limit_h": int(float(r.get("limit_h", 40) or 40)),
+                "stawka_h": float(str(r.get("stawka_h", "") or "nan").replace(",", ".")),
+                **dok,
+                "dostepnosc": {d: okna(r.get(d, "")) for d in DNI},
+            }
+        )
+    return kurierzy
+
+
+def wczytaj_zapotrzebowanie(sciezka):
+    df = pd.read_csv(sciezka)
+    df["godzina"] = df["godzina"].astype(int)
+    return df.set_index("godzina")[DNI]
+
+
+def obsada(zam, u: Ustawienia):
+    k = max(u.min_obsada, math.ceil(zam / u.dostawy_na_h - 1e-09))
+    auta = math.ceil(k * u.udzial_aut) if k >= u.prog_aut else 0
+    rowery = max(1, math.floor(k * u.max_udzial_rowerow))
+    return (k, auta, rowery)
+
+
+def tabela_obsady(zap, u):
+    rows = []
+    for d in DNI:
+        for h in range(u.otwarcie, u.zamkniecie):
+            z = int(zap.at[h, d]) if h in zap.index else 0
+            k, a, r = obsada(z, u)
+            rows.append(
+                {"dzien": d, "godzina": h, "zamowienia": z, "potrzeba": k, "auta": a, "max_rowery": r}
+            )
+    return pd.DataFrame(rows)
+
+
+def dokumenty_ok(k, dzien_data, u):
+    return all((k.get(p) is not None and k[p] >= dzien_data for p in u.wymagane_dokumenty))
+
+
+def dostepny(k, dzien, h):
+    return any((od <= h < do for od, do in k["dostepnosc"][dzien]))
+
+
+def okno_z_godzina(k, dzien, h):
+    for od, do in k["dostepnosc"][dzien]:
+        if od <= h < do:
+            return (od, do)
+    return None
+
+
+def odpoczynek_ok(zmiany_k, data_dnia, start, koniec, u):
+    for z in zmiany_k:
+        if z["data"] == data_dnia - timedelta(days=1) and 24 - z["koniec"] + start < u.odpoczynek:
+            return False
+        if z["data"] == data_dnia + timedelta(days=1) and 24 - koniec + z["start"] < u.odpoczynek:
+            return False
+    return True
+
+
+def generuj_grafik(kurierzy, zap, poniedzialek: date, u: Ustawienia = Ustawienia()):
+    ob = tabela_obsady(zap, u)
+    godziny = list(range(u.otwarcie, u.zamkniecie))
+    po_imieniu = {k["imie"]: k for k in kurierzy}
+    zmiany = []
+
+    def data_dnia(dzien):
+        return poniedzialek + timedelta(days=DNI.index(dzien))
+
+    def uzyte(im):
+        return sum((z["koniec"] - z["start"] for z in zmiany if z["kurier"] == im))
+
+    def stan(dzien):
+        cover = {h: 0 for h in godziny}
+        auta = dict(cover)
+        rowery = dict(cover)
+        for z in zmiany:
+            if z["dzien"] != dzien:
+                continue
+            for g in range(z["start"], z["koniec"]):
+                cover[g] += 1
+                auta[g] += z["pojazd"] == "auto"
+                rowery[g] += z["pojazd"] == "rower"
+        return (cover, auta, rowery)
+
+    def brak_sumaryczny(dzien, o):
+        cover, _, _ = stan(dzien)
+        return sum((max(0, o.at[h, "potrzeba"] - cover[h]) for h in godziny))
+
+    def wypelnij(dzien):
+        o = ob[ob.dzien == dzien].set_index("godzina")
+        dd = data_dnia(dzien)
+        nie_do_obsadzenia = set()
+        while True:
+            cover, auta, rowery = stan(dzien)
+            luka = lambda g: o.at[g, "potrzeba"] - cover[g]
+            luka_aut = lambda g: o.at[g, "auta"] - auta[g]
+            kandydaci_h = [h for h in godziny if luka(h) > 0 and h not in nie_do_obsadzenia]
+            if not kandydaci_h:
+                return
+            h = max(kandydaci_h, key=lambda g: (luka(g), luka_aut(g), o.at[g, "potrzeba"]))
+            potrzeba_auta = luka_aut(h) > 0
+            pracuje_dzis = {z["kurier"] for z in zmiany if z["dzien"] == dzien}
+            najlepszy = None
+            for k in kurierzy:
+                im = k["imie"]
+                if im in pracuje_dzis or not dostepny(k, dzien, h) or (not dokumenty_ok(k, dd, u)):
+                    continue
+                zostalo = k["limit_h"] - uzyte(im)
+                od, do = okno_z_godzina(k, dzien, h)
+                if min(zostalo, do - od) < u.min_zmiana:
+                    continue
+                rower_ok = rowery[h] < o.at[h, "max_rowery"]
+                if not (k["auto"] or k["skuter"] or (k["rower"] and rower_ok)):
+                    continue
+                pokrywa = sum((1 for g in range(od, do) if g in cover and luka(g) > 0))
+                wynik = (
+                    1 if potrzeba_auta and k["auto"] else 0,
+                    -uzyte(im) / max(k["limit_h"], 1),
+                    pokrywa,
+                    0 if k["auto"] and (not potrzeba_auta) else 1,
+                )
+                if najlepszy is None or wynik > najlepszy[0]:
+                    najlepszy = (wynik, k, od, do, zostalo)
+            if najlepszy is None:
+                nie_do_obsadzenia.add(h)
+                continue
+            _, k, od, do, zostalo = najlepszy
+            maks = min(u.max_zmiana, zostalo)
+            start, koniec = (h, h + 1)
+            while koniec - start < maks:
+                lewo = luka(start - 1) if start - 1 >= od and start - 1 in cover else -99
+                prawo = luka(koniec) if koniec < do and koniec in cover else -99
+                if max(lewo, prawo) <= 0:
+                    break
+                if prawo >= lewo:
+                    koniec += 1
+                else:
+                    start -= 1
+            while koniec - start < u.min_zmiana:
+                lewo = luka(start - 1) if start - 1 >= od and start - 1 in cover else -99
+                prawo = luka(koniec) if koniec < do and koniec in cover else -99
+                if max(lewo, prawo) == -99:
+                    break
+                if prawo >= lewo:
+                    koniec += 1
+                else:
+                    start -= 1
+            if koniec - start < u.min_zmiana or not odpoczynek_ok(
+                [z for z in zmiany if z["kurier"] == k["imie"]], dd, start, koniec, u
+            ):
+                nie_do_obsadzenia.add(h)
+                continue
+            if potrzeba_auta and k["auto"]:
+                pojazd = "auto"
+            elif k["skuter"]:
+                pojazd = "skuter"
+            elif k["rower"] and rowery[h] < o.at[h, "max_rowery"]:
+                pojazd = "rower"
+            else:
+                pojazd = "auto"
+            zmiany.append(
+                {
+                    "dzien": dzien,
+                    "data": dd,
+                    "kurier": k["imie"],
+                    "start": start,
+                    "koniec": koniec,
+                    "godziny": koniec - start,
+                    "pojazd": pojazd,
+                    "terminal": k["terminal"],
+                    "zrodlo": "auto",
+                }
+            )
+
+    def napraw(dzien):
+        o = ob[ob.dzien == dzien].set_index("godzina")
+        for _ in range(50):
+            zmiana_byla = False
+            for z in [z for z in zmiany if z["dzien"] == dzien]:
+                k = po_imieniu[z["kurier"]]
+                od, do = okno_z_godzina(k, dzien, z["start"])
+                cover, auta, _ = stan(dzien)
+                nad = lambda g: cover[g] - o.at[g, "potrzeba"]
+                auto_potrzebne = lambda g: z["pojazd"] == "auto" and auta[g] <= o.at[g, "auta"]
+                if z["koniec"] - z["start"] > u.min_zmiana:
+                    if nad(z["koniec"] - 1) > 0 and (not auto_potrzebne(z["koniec"] - 1)):
+                        z["koniec"] -= 1
+                        zmiana_byla = True
+                        continue
+                    if nad(z["start"]) > 0 and (not auto_potrzebne(z["start"])):
+                        z["start"] += 1
+                        zmiana_byla = True
+                        continue
+                przed = brak_sumaryczny(dzien, o)
+                for d in (-1, 1, -2, 2, -3, 3):
+                    ns, nk = (z["start"] + d, z["koniec"] + d)
+                    if ns < max(od, u.otwarcie) or nk > min(do, u.zamkniecie):
+                        continue
+                    stare = (z["start"], z["koniec"])
+                    z["start"], z["koniec"] = (ns, nk)
+                    if brak_sumaryczny(dzien, o) < przed:
+                        zmiana_byla = True
+                        break
+                    z["start"], z["koniec"] = stare
+                else:
+                    if z["koniec"] - z["start"] < u.max_zmiana and uzyte(k["imie"]) < k["limit_h"]:
+                        if z["koniec"] < min(do, u.zamkniecie) and nad(z["koniec"]) < 0:
+                            z["koniec"] += 1
+                            zmiana_byla = True
+                        elif z["start"] > max(od, u.otwarcie) and nad(z["start"] - 1) < 0:
+                            z["start"] -= 1
+                            zmiana_byla = True
+            if not zmiana_byla:
+                break
+        for z in zmiany:
+            z["godziny"] = z["koniec"] - z["start"]
+
+    kolejnosc = ob.groupby("dzien")["potrzeba"].sum().sort_values(ascending=False).index.tolist()
+    for dzien in kolejnosc:
+        wypelnij(dzien)
+        napraw(dzien)
+    for dzien in kolejnosc:
+        napraw(dzien)
+        wypelnij(dzien)
+        napraw(dzien)
+    grafik = pd.DataFrame(zmiany)
+    if not grafik.empty:
+        grafik["dzien_nr"] = grafik["dzien"].map(DNI.index)
+        grafik = (
+            grafik.sort_values(["dzien_nr", "start", "kurier"])
+            .drop(columns="dzien_nr")
+            .reset_index(drop=True)
+        )
+    return grafik
+
+
+def zastosuj_korekty(grafik, sciezka, kurierzy, poniedzialek):
+    if not os.path.exists(sciezka):
+        return grafik
+    kor = pd.read_csv(sciezka, dtype=str).fillna("")
+    if kor.empty:
+        return grafik
+    po_imieniu = {k["imie"]: k for k in kurierzy}
+    g = grafik.copy()
+    for _, r in kor.iterrows():
+        g = g[~((g.kurier == r.kurier) & (g.dzien == r.dzien))]
+        if r.start:
+            k = po_imieniu.get(r.kurier, {})
+            pojazd = r.get("pojazd", "") or (
+                "skuter" if k.get("skuter") else "auto" if k.get("auto") else "rower"
+            )
+            g = pd.concat(
+                [
+                    g,
+                    pd.DataFrame(
+                        [
+                            {
+                                "dzien": r.dzien,
+                                "data": poniedzialek + timedelta(days=DNI.index(r.dzien)),
+                                "kurier": r.kurier,
+                                "start": int(r.start),
+                                "koniec": int(r.koniec),
+                                "godziny": int(r.koniec) - int(r.start),
+                                "pojazd": pojazd,
+                                "terminal": k.get("terminal", False),
+                                "zrodlo": "ręcznie",
+                            }
+                        ]
+                    ),
+                ]
+            )
+    g["dzien_nr"] = g["dzien"].map(DNI.index)
+    return g.sort_values(["dzien_nr", "start", "kurier"]).drop(columns="dzien_nr").reset_index(drop=True)
+
+
+def pokrycie(grafik, zap, u):
+    ob = tabela_obsady(zap, u)
+    ob["obsada"] = 0
+    ob["auta_w_grafiku"] = 0
+    for _, z in grafik.iterrows():
+        m = (ob.dzien == z.dzien) & (ob.godzina >= z.start) & (ob.godzina < z.koniec)
+        ob.loc[m, "obsada"] += 1
+        if z.pojazd == "auto":
+            ob.loc[m, "auta_w_grafiku"] += 1
+    ob["roznica"] = ob["obsada"] - ob["potrzeba"]
+    return ob
+
+
+def godziny_kurierow(grafik, kurierzy):
+    h = grafik.groupby("kurier")["godziny"].sum() if not grafik.empty else pd.Series(dtype=int)
+    rows = [
+        {
+            "kurier": k["imie"],
+            "godziny": int(h.get(k["imie"], 0)),
+            "limit_h": k["limit_h"],
+            "wykorzystanie_%": round(100 * h.get(k["imie"], 0) / max(k["limit_h"], 1)),
+        }
+        for k in kurierzy
+    ]
+    return pd.DataFrame(rows).sort_values("wykorzystanie_%", ascending=False).reset_index(drop=True)
+
+
+def alerty(grafik, pok, kurierzy, poniedzialek, u):
+    out = []
+    koniec_tyg = poniedzialek + timedelta(days=6)
+    for k in kurierzy:
+        for p, nazwa in (("sanepid_do", "orzeczenie sanepid"), ("bhp_do", "szkolenie BHP")):
+            d = k.get(p)
+            if d is None:
+                out.append(("BŁĄD", f"{k['imie']}: brak daty – {nazwa}; kurier nie jest planowany"))
+            elif d < poniedzialek:
+                out.append(("BŁĄD", f"{k['imie']}: {nazwa} wygasło {d:%d.%m.%Y}; kurier nie jest planowany"))
+            elif d < koniec_tyg:
+                out.append(
+                    (
+                        "UWAGA",
+                        f"{k['imie']}: {nazwa} wygasa {d:%d.%m.%Y} – od następnego dnia nie jest planowany(a)",
+                    )
+                )
+            elif d <= koniec_tyg + timedelta(days=u.ostrzegaj_dni):
+                out.append(("UWAGA", f"{k['imie']}: {nazwa} ważne do {d:%d.%m.%Y}"))
+    braki = pok[pok.roznica < 0]
+    for dzien, grp in braki.groupby("dzien", sort=False):
+        godz = ", ".join((f"{h}:00 (−{-r})" for h, r in zip(grp.godzina, grp.roznica)))
+        out.append(("BRAK", f"{dzien}: brakuje kurierów o {godz}"))
+    brak_aut = pok[pok.auta_w_grafiku < pok.auta]
+    for dzien, grp in brak_aut.groupby("dzien", sort=False):
+        out.append(("UWAGA", f"{dzien}: za mało aut o " + ", ".join((f"{h}:00" for h in grp.godzina))))
+    if not grafik.empty:
+        for dzien in DNI:
+            g = grafik[grafik.dzien == dzien]
+            for h in range(u.otwarcie, u.zamkniecie):
+                na_zmianie = g[(g.start <= h) & (g.koniec > h)]
+                if len(na_zmianie) and (not na_zmianie.terminal.any()):
+                    out.append(("UWAGA", f"{dzien} {h}:00: nikt na zmianie nie obsługuje terminala"))
+                    break
+    return pd.DataFrame(out, columns=["typ", "komunikat"])
+
+
+def prognoza_z_historii(sciezka, tygodnie=6, u: Ustawienia = Ustawienia(), dostawa_kol="dostawa"):
+    h = pd.read_csv(sciezka)
+    h["czas"] = pd.to_datetime(h["czas"])
+    if dostawa_kol in h.columns:
+        h = h[h[dostawa_kol].map(tak)]
+    h = h[h["czas"] >= h["czas"].max().normalize() - pd.Timedelta(weeks=tygodnie)]
+    h["dzien"] = h["czas"].dt.dayofweek.map(lambda i: DNI[i])
+    h["godzina"] = h["czas"].dt.hour
+    h["data"] = h["czas"].dt.date
+    dziennie = h.groupby(["data", "dzien", "godzina"]).size().reset_index(name="n")
+    ile_dni = h.groupby("dzien")["data"].nunique()
+    suma = dziennie.groupby(["godzina", "dzien"])["n"].sum().unstack(fill_value=0)
+    sr = suma / ile_dni
+    sr = sr.reindex(index=range(u.otwarcie, u.zamkniecie), columns=DNI).fillna(0)
+    return sr.apply(lambda s: s.map(lambda v: math.ceil(v - 0.25))).astype(int)
+
+
+def tabela_tygodnia(grafik, kurierzy):
+    skrot = {"auto": "A", "skuter": "S", "rower": "R"}
+    t = pd.DataFrame("", index=[k["imie"] for k in kurierzy], columns=DNI)
+    for z in grafik.itertuples():
+        t.at[z.kurier, z.dzien] = f"{z.start}–{z.koniec} {skrot.get(z.pojazd, '')}"
+    t["Suma h"] = [int(grafik.loc[grafik.kurier == im, "godziny"].sum()) for im in t.index]
+    return t
+
+
+import numpy as np
+
+
+@dataclass
+class ParametryGA:
+    populacja: int = 120
+    pokolenia: int = 500
+    elita: int = 4
+    turniej: int = 3
+    p_krzyzowania: float = 0.9
+    p_mutacji: float = 0.02
+    p_start_zmiany: float = 0.35
+    cierpliwosc: int = 120
+    start_z_zachlannego: bool = True
+    ziarno: int = 1
+    waga_braku: float = 500
+    waga_auta: float = 150
+    waga_terminala: float = 40
+    waga_rownosci: float = 400
+    waga_rowerow: float = 300
+    waga_limitu: float = 1000
+    waga_odpoczynku: float = 1000
+
+
+def koszt_zmiany(k, godziny, pojazd, u):
+    stawka = k.get("stawka_h")
+    if stawka is None or (isinstance(stawka, float) and math.isnan(stawka)):
+        stawka = u.stawka_domyslna
+    dodatek = u.dodatek_auto_h if pojazd == "auto" else u.dodatek_skuter_h if pojazd == "skuter" else 0
+    return godziny * (stawka + dodatek)
+
+
+class ProblemGrafiku:
+
+    def __init__(self, kurierzy, zap, poniedzialek, u):
+        self.kurierzy, self.u, self.P = (kurierzy, u, poniedzialek)
+        self.godziny = list(range(u.otwarcie, u.zamkniecie))
+        H = len(self.godziny)
+        self.nK, self.H = (len(kurierzy), H)
+        ob = tabela_obsady(zap, u)
+        klucz = lambda d, h: DNI.index(d) * H + (h - u.otwarcie)
+        self.potrzeba = np.zeros(7 * H)
+        self.auta = np.zeros(7 * H)
+        self.max_rowery = np.zeros(7 * H)
+        for r in ob.itertuples():
+            i = klucz(r.dzien, r.godzina)
+            self.potrzeba[i], self.auta[i], self.max_rowery[i] = (r.potrzeba, r.auta, r.max_rowery)
+        pokr, auto, rower, term, godz, koszt, start, kon, poj = (
+            [np.zeros(7 * H)],
+            [np.zeros(7 * H)],
+            [np.zeros(7 * H)],
+            [np.zeros(7 * H)],
+            [0],
+            [0.0],
+            [0],
+            [0],
+            [""],
+        )
+        self.opcje_genu = []
+        for ki, k in enumerate(kurierzy):
+            pojazdy = (["auto"] if k["auto"] else []) + (
+                ["skuter"] if k["skuter"] else ["rower"] if k["rower"] else []
+            )
+            for di, d in enumerate(DNI):
+                lista = [0]
+                if dokumenty_ok(k, poniedzialek + timedelta(days=di), u):
+                    for od, do in k["dostepnosc"][d]:
+                        od, do = (max(od, u.otwarcie), min(do, u.zamkniecie))
+                        for s in range(od, do):
+                            for L in range(u.min_zmiana, min(u.max_zmiana, k["limit_h"]) + 1):
+                                if s + L > do:
+                                    continue
+                                for p in pojazdy:
+                                    v = np.zeros(7 * H)
+                                    v[di * H + (s - u.otwarcie) : di * H + (s + L - u.otwarcie)] = 1
+                                    lista.append(len(pokr))
+                                    pokr.append(v)
+                                    auto.append(v * (p == "auto"))
+                                    rower.append(v * (p == "rower"))
+                                    term.append(v * k["terminal"])
+                                    godz.append(L)
+                                    koszt.append(koszt_zmiany(k, L, p, u))
+                                    start.append(s)
+                                    kon.append(s + L)
+                                    poj.append(p)
+                self.opcje_genu.append(np.array(lista))
+        self.O_pokr, self.O_auto, self.O_rower = (np.array(pokr), np.array(auto), np.array(rower))
+        self.O_term, self.O_godz, self.O_koszt = (np.array(term), np.array(godz), np.array(koszt))
+        self.O_start, self.O_kon, self.O_poj = (np.array(start), np.array(kon), np.array(poj))
+        self.G = self.nK * 7
+        self.limity = np.array([k["limit_h"] for k in kurierzy])
+        self.sasiedzi = {}
+        for lista in self.opcje_genu:
+            for o in lista[1:]:
+                self.sasiedzi[o] = [
+                    p
+                    for p in lista[1:]
+                    if p != o
+                    and self.O_poj[p] == self.O_poj[o]
+                    and (abs(self.O_start[p] - self.O_start[o]) + abs(self.O_kon[p] - self.O_kon[o]) == 1)
+                ]
+        moga = np.array(
+            [any((len(self.opcje_genu[ki * 7 + d]) > 1 for d in range(7))) for ki in range(self.nK)]
+        )
+        self.moga_pracowac = moga
+        self.cel = min(1.0, self.potrzeba.sum() / max(self.limity[moga].sum(), 1))
+
+    def ocen(self, pop, w: ParametryGA, szczegoly=False):
+        obs = self.O_pokr[pop].sum(1)
+        braki = np.clip(self.potrzeba - obs, 0, None).sum(1)
+        braki_aut = np.clip(self.auta - self.O_auto[pop].sum(1), 0, None).sum(1)
+        rowery_nad = np.clip(self.O_rower[pop].sum(1) - self.max_rowery, 0, None).sum(1)
+        bez_term = ((self.O_term[pop].sum(1) == 0) & (self.potrzeba > 0)).sum(1)
+        koszt = self.O_koszt[pop].sum(1)
+        godz = self.O_godz[pop].reshape(len(pop), self.nK, 7).sum(2)
+        ponad_limit = np.clip(godz - self.limity, 0, None).sum(1)
+        wyk = godz / np.maximum(self.limity, 1)
+        odchylenie = (np.abs(wyk - self.cel) * self.moga_pracowac).sum(1)
+        st = self.O_start[pop].reshape(len(pop), self.nK, 7)
+        kn = self.O_kon[pop].reshape(len(pop), self.nK, 7)
+        oba = (kn[:, :, :-1] > 0) & (st[:, :, 1:] > 0)
+        odpoczynek = (oba & (24 - kn[:, :, :-1] + st[:, :, 1:] < self.u.odpoczynek)).sum((1, 2))
+        kara = (
+            w.waga_braku * braki
+            + w.waga_auta * braki_aut
+            + w.waga_terminala * bez_term
+            + koszt
+            + w.waga_rownosci * odchylenie
+            + w.waga_rowerow * rowery_nad
+            + w.waga_limitu * ponad_limit
+            + w.waga_odpoczynku * odpoczynek
+        )
+        if szczegoly:
+            return (
+                kara,
+                {
+                    "braki_h": braki,
+                    "braki_aut_h": braki_aut,
+                    "bez_terminala_h": bez_term,
+                    "koszt_zl": koszt,
+                    "rowery_ponad": rowery_nad,
+                    "ponad_limit_h": ponad_limit,
+                },
+            )
+        return kara
+
+    def napraw(self, osobnik, rng):
+        godz = self.O_godz[osobnik].reshape(self.nK, 7)
+        for ki in np.where(godz.sum(1) > self.limity)[0]:
+            dni = list(np.where(godz[ki] > 0)[0])
+            rng.shuffle(dni)
+            for d in dni:
+                if godz[ki].sum() <= self.limity[ki]:
+                    break
+                osobnik[ki * 7 + d] = 0
+                godz[ki, d] = 0
+        return osobnik
+
+    def losowy(self, rng, p_start):
+        os_ = np.zeros(self.G, dtype=np.int64)
+        for g, lista in enumerate(self.opcje_genu):
+            if len(lista) > 1 and rng.random() < p_start:
+                os_[g] = rng.choice(lista[1:])
+        return self.napraw(os_, rng)
+
+    def z_grafiku(self, grafik):
+        os_ = np.zeros(self.G, dtype=np.int64)
+        po_imieniu = {k["imie"]: i for i, k in enumerate(self.kurierzy)}
+        for z in grafik.itertuples():
+            g = po_imieniu[z.kurier] * 7 + DNI.index(z.dzien)
+            pasuje = [
+                o for o in self.opcje_genu[g][1:] if self.O_start[o] == z.start and self.O_kon[o] == z.koniec
+            ]
+            if pasuje:
+                takie_same = [o for o in pasuje if self.O_poj[o] == z.pojazd]
+                os_[g] = (takie_same or pasuje)[0]
+        return os_
+
+    def na_grafik(self, osobnik):
+        rows = []
+        for g, o in enumerate(osobnik):
+            if o == 0:
+                continue
+            k, d = (self.kurierzy[g // 7], DNI[g % 7])
+            rows.append(
+                {
+                    "dzien": d,
+                    "data": self.P + timedelta(days=g % 7),
+                    "kurier": k["imie"],
+                    "start": int(self.O_start[o]),
+                    "koniec": int(self.O_kon[o]),
+                    "godziny": int(self.O_godz[o]),
+                    "pojazd": str(self.O_poj[o]),
+                    "terminal": k["terminal"],
+                    "zrodlo": "genetyczny",
+                }
+            )
+        g = pd.DataFrame(
+            rows,
+            columns=["dzien", "data", "kurier", "start", "koniec", "godziny", "pojazd", "terminal", "zrodlo"],
+        )
+        if not g.empty:
+            g["dzien_nr"] = g["dzien"].map(DNI.index)
+            g = g.sort_values(["dzien_nr", "start", "kurier"]).drop(columns="dzien_nr").reset_index(drop=True)
+        return g
+
+
+def algorytm_genetyczny(
+    kurierzy, zap, poniedzialek, u: Ustawienia = Ustawienia(), w: ParametryGA = ParametryGA(), log=print
+):
+    rng = np.random.default_rng(w.ziarno)
+    pr = ProblemGrafiku(kurierzy, zap, poniedzialek, u)
+    log(f"Genów w chromosomie: {pr.G} (kurier × dzień), możliwych zmian: {len(pr.O_godz) - 1}")
+    pop = np.array([pr.losowy(rng, w.p_start_zmiany) for _ in range(w.populacja)])
+    if w.start_z_zachlannego:
+        pop[0] = pr.napraw(pr.z_grafiku(generuj_grafik(kurierzy, zap, poniedzialek, u)), rng)
+    kara = pr.ocen(pop, w)
+    historia, najlepsza, bez_poprawy = ([], kara.min(), 0)
+    for pokolenie in range(1, w.pokolenia + 1):
+        kolejnosc = np.argsort(kara)
+        nowa = [pop[i].copy() for i in kolejnosc[: w.elita]]
+        while len(nowa) < w.populacja:
+            a = pop[min(rng.integers(0, w.populacja, w.turniej), key=lambda i: kara[i])]
+            b = pop[min(rng.integers(0, w.populacja, w.turniej), key=lambda i: kara[i])]
+            if rng.random() < w.p_krzyzowania:
+                od_a = np.repeat(rng.random(pr.nK) < 0.5, 7)
+                dziecko = np.where(od_a, a, b)
+            else:
+                dziecko = a.copy()
+            for g in np.where(rng.random(pr.G) < w.p_mutacji)[0]:
+                o = dziecko[g]
+                if o != 0 and pr.sasiedzi.get(o) and (rng.random() < 0.6):
+                    dziecko[g] = rng.choice(pr.sasiedzi[o])
+                elif o != 0:
+                    dziecko[g] = 0
+                elif len(pr.opcje_genu[g]) > 1:
+                    dziecko[g] = rng.choice(pr.opcje_genu[g][1:])
+            nowa.append(pr.napraw(dziecko, rng))
+        pop = np.array(nowa)
+        kara = pr.ocen(pop, w)
+        historia.append(
+            {"pokolenie": pokolenie, "najlepsza_kara": float(kara.min()), "srednia_kara": float(kara.mean())}
+        )
+        if kara.min() < najlepsza - 1e-06:
+            najlepsza, bez_poprawy = (kara.min(), 0)
+        else:
+            bez_poprawy += 1
+        if pokolenie % 50 == 0 or pokolenie == 1:
+            log(
+                f"  pokolenie {pokolenie:4d}: najlepsza kara {kara.min():10.0f} | średnia {kara.mean():10.0f}"
+            )
+        if bez_poprawy >= w.cierpliwosc:
+            log(f"  stop: {w.cierpliwosc} pokoleń bez poprawy (pokolenie {pokolenie})")
+            break
+    najlepszy = pop[np.argmin(kara)].copy()
+    k_naj = pr.ocen(najlepszy[None, :], w)[0]
+    poprawiono = True
+    while poprawiono:
+        poprawiono = False
+        for g in range(pr.G):
+            o = najlepszy[g]
+            kandydaci = [0] + pr.sasiedzi.get(o, []) if o != 0 else list(pr.opcje_genu[g][1:])
+            if not kandydaci:
+                continue
+            proby = np.repeat(najlepszy[None, :], len(kandydaci), axis=0)
+            proby[:, g] = kandydaci
+            kary = pr.ocen(proby, w)
+            i = int(np.argmin(kary))
+            if (
+                kary[i] < k_naj - 1e-06
+                and pr.O_godz[proby[i]].reshape(pr.nK, 7).sum(1).__le__(pr.limity).all()
+            ):
+                najlepszy, k_naj, poprawiono = (proby[i].copy(), kary[i], True)
+    log(f"  po doszlifowaniu: kara {k_naj:.0f}")
+    return (pr.na_grafik(najlepszy), pd.DataFrame(historia), pr)
+
+
+def _main(argv=None):
+    import argparse, json, time
+
+    p = argparse.ArgumentParser(description="Grafik kurierów – algorytm genetyczny.")
+    p.add_argument(
+        "--dane", required=True, help="folder z kurierzy.csv i historia_zamowien.csv (np. z generatora)"
+    )
+    p.add_argument(
+        "--tydzien", default=None, help="poniedziałek RRRR-MM-DD (domyślnie z metadane.json albo najbliższy)"
+    )
+    p.add_argument(
+        "--zapotrzebowanie", default=None, help="gotowe zapotrzebowanie: godzina, Pon..Nd (zamiast historii)"
+    )
+    p.add_argument("--tygodnie", type=int, default=6, help="z ilu ostatnich tygodni historii liczyć średnią")
+    p.add_argument("--dostawy-na-h", type=float, default=2.5)
+    p.add_argument("--populacja", type=int, default=120)
+    p.add_argument("--pokolenia", type=int, default=500)
+    p.add_argument("--mutacja", type=float, default=0.02, help="prawdopodobieństwo mutacji genu")
+    p.add_argument(
+        "--ziarno", type=int, default=1, help="ziarno losowości algorytmu (ten sam = ten sam wynik)"
+    )
+    p.add_argument(
+        "--bez-zachlannego", action="store_true", help="czysty GA: populacja startowa tylko losowa"
+    )
+    p.add_argument("--wyjscie", default=None, help="folder na wyniki (domyślnie <dane>/grafik_genetyczny)")
+    a = p.parse_args(argv)
+    meta = os.path.join(a.dane, "metadane.json")
+    if a.tydzien:
+        P = date.fromisoformat(a.tydzien)
+    elif os.path.exists(meta):
+        P = date.fromisoformat(json.load(open(meta, encoding="utf-8"))["tydzien"])
+    else:
+        P = date.today() + timedelta(days=7 - date.today().weekday())
+    u = Ustawienia(dostawy_na_h=a.dostawy_na_h)
+    w = ParametryGA(
+        populacja=a.populacja,
+        pokolenia=a.pokolenia,
+        p_mutacji=a.mutacja,
+        ziarno=a.ziarno,
+        start_z_zachlannego=not a.bez_zachlannego,
+    )
+    kurierzy = wczytaj_kurierow(os.path.join(a.dane, "kurierzy.csv"))
+    if a.zapotrzebowanie:
+        zap, zrodlo = (wczytaj_zapotrzebowanie(a.zapotrzebowanie), a.zapotrzebowanie)
+    else:
+        zap = prognoza_z_historii(os.path.join(a.dane, "historia_zamowien.csv"), a.tygodnie, u)
+        zrodlo = f"średnia z {a.tygodnie} ostatnich tygodni historii"
+    print(f"Tydzień {P:%d.%m}–{P + timedelta(days=6):%d.%m.%Y} | zapotrzebowanie: {zrodlo}")
+    t0 = time.time()
+    grafik, ewolucja, pr = algorytm_genetyczny(kurierzy, zap, P, u, w)
+    czas = time.time() - t0
+    g_zach = generuj_grafik(kurierzy, zap, P, u)
+    _, s_gen = pr.ocen(pr.z_grafiku(grafik)[None, :], w, szczegoly=True)
+    _, s_zach = pr.ocen(pr.z_grafiku(g_zach)[None, :], w, szczegoly=True)
+    pok = pokrycie(grafik, zap, u)
+    al = alerty(grafik, pok, kurierzy, P, u)
+    wyj = a.wyjscie or os.path.join(a.dane, "grafik_genetyczny")
+    os.makedirs(wyj, exist_ok=True)
+    grafik.to_csv(os.path.join(wyj, "grafik.csv"), index=False)
+    tydz = tabela_tygodnia(grafik, kurierzy)
+    tydz.to_csv(os.path.join(wyj, "grafik_tydzien.csv"))
+    pok.to_csv(os.path.join(wyj, "pokrycie.csv"), index=False)
+    al.to_csv(os.path.join(wyj, "alerty.csv"), index=False)
+    ewolucja.to_csv(os.path.join(wyj, "ewolucja.csv"), index=False)
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.plot(ewolucja.pokolenie, ewolucja.najlepsza_kara, color="#2a78d6", lw=2, label="najlepszy grafik")
+        ax.plot(ewolucja.pokolenie, ewolucja.srednia_kara, color="#9a9893", lw=1, label="średnia populacji")
+        ax.set_yscale("log")
+        ax.set_xlabel("pokolenie")
+        ax.set_ylabel("kara (zł, skala log.)")
+        ax.set_title("Ewolucja grafiku", loc="left", fontweight="bold")
+        ax.grid(alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(os.path.join(wyj, "ewolucja.png"), dpi=110)
+        plt.close(fig)
+    except ImportError:
+        pass
+    pd.set_option("display.width", 200)
+    print(f"\nCzas: {czas:.1f} s | pokoleń: {len(ewolucja)}\n")
+    print(f"{'':22s}{'genetyczny':>12s}{'zachłanny':>12s}")
+    for etykieta, klucz in [
+        ("braki (h)", "braki_h"),
+        ("braki aut (h)", "braki_aut_h"),
+        ("bez terminala (h)", "bez_terminala_h"),
+        ("koszt (zł)", "koszt_zl"),
+    ]:
+        print(f"{etykieta:22s}{s_gen[klucz][0]:>12.0f}{s_zach[klucz][0]:>12.0f}")
+    print("\nGrafik (A = auto, S = skuter, R = rower):")
+    print(tydz.to_string(), "\n")
+    print("Obsada minus potrzeba (ujemne = brakuje kurierów):")
+    print(pok.pivot(index="dzien", columns="godzina", values="roznica").loc[DNI].to_string(), "\n")
+    if len(al):
+        print("Alerty:")
+        for r in al.itertuples():
+            print(f"  [{r.typ}] {r.komunikat}")
+    print(f"\nZapisano w: {wyj}")
+
+
+if __name__ == "__main__":
+    _main()
